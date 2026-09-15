@@ -92,6 +92,18 @@
 
   #toolbar .emoji-btn { font-size: 15px; padding: 6px 9px; }
 
+  #mapNameInput {
+    background: #2b3244;
+    color: var(--toolbar-fg);
+    border: 1px solid #3a4256;
+    border-radius: 7px;
+    padding: 7px 10px;
+    font-size: 13px;
+    width: 190px;
+    margin-right: 4px;
+  }
+  #mapNameInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
   #zoomLabel {
     font-size: 12px;
     color: #a7adbd;
@@ -168,7 +180,6 @@
     position: absolute;
     transform: translate(-50%, -50%);
     width: fit-content;
-    max-width: 260px;
     min-width: 24px;
     background: var(--node-bg);
     color: var(--node-fg);
@@ -186,7 +197,7 @@
   .node .label {
     outline: none;
     word-wrap: break-word;
-    white-space: pre-wrap;
+    white-space: nowrap;
   }
 
   .node:hover { box-shadow: var(--shadow-lg); }
@@ -204,13 +215,12 @@
     font-weight: 700;
     padding: 14px 24px;
     border-radius: 14px;
-    max-width: 320px;
   }
   .node.root.selected { box-shadow: 0 0 0 3px rgba(76, 110, 245, 0.55), var(--shadow-lg); }
 
   .node.status-green  { background: #2f9e44; border-color: #2f9e44; color: #fff; }
   .node.status-red    { background: #e03131; border-color: #e03131; color: #fff; }
-  .node.status-orange { background: #e8590c; border-color: #e8590c; color: #fff; }
+  .node.status-yellow { background: #f1c40f; border-color: #f1c40f; color: #22262f; }
 
   .node .badge {
     position: absolute;
@@ -225,6 +235,25 @@
     box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     pointer-events: none;
   }
+
+  .node .link-icon {
+    position: absolute;
+    bottom: -9px;
+    left: -9px;
+    width: 18px;
+    height: 18px;
+    background: #1c7ed6;
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    text-decoration: none;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .node .link-icon:hover { background: #1971c2; }
+  .node .link-icon[hidden] { display: none; }
 
   .node.shake { animation: shake 0.32s; }
   @keyframes shake {
@@ -242,6 +271,8 @@
   <div id="toolbar">
     <span class="brand">🧠 Mind Map</span>
 
+    <input type="text" id="mapNameInput" title="Name of this mind map" placeholder="Mind map name" maxlength="120">
+
     <button id="addChildBtn" class="primary" title="Add child node (Enter)">➕ Add Child</button>
     <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
     <button id="resetBtn" title="Reset to a single root node">🔄 Reset</button>
@@ -251,6 +282,10 @@
     <button id="saveBtn" title="Save mind map to an XML file">💾 Save</button>
     <button id="importBtn" title="Import a mind map from an XML file">📂 Import</button>
     <input type="file" id="fileInput" accept=".xml,text/xml,application/xml">
+
+    <span class="sep"></span>
+
+    <button id="linkBtn" title="Add / edit a link on the selected node">🔗 Link</button>
 
     <span class="sep"></span>
 
@@ -281,7 +316,7 @@
         <tr><td>F1</td><td>Reset node color</td></tr>
         <tr><td>F3</td><td>Color node green</td></tr>
         <tr><td>F4</td><td>Color node red</td></tr>
-        <tr><td>F7</td><td>Color node orange</td></tr>
+        <tr><td>F7</td><td>Color node yellow</td></tr>
         <tr><td>Ctrl+Z</td><td>Undo</td></tr>
         <tr><td>Drag canvas</td><td>Pan</td></tr>
         <tr><td>Scroll</td><td>Zoom</td></tr>
@@ -317,10 +352,11 @@
 
   function freshRoot(text) {
     idCounter = 1;
-    return { id: 0, parent: null, text: text, children: [], collapsed: false, status: null, side: "root", branchColor: null };
+    return { id: 0, parent: null, text: text, children: [], collapsed: false, status: null, side: "root", branchColor: null, link: null };
   }
 
   let root = freshRoot("Central Idea");
+  let mapName = "Untitled Mind Map";
   let selectedId = null;
   let editingId = null;
   const nodeIndex = new Map();   // id -> node
@@ -328,6 +364,8 @@
 
   const undoStack = [];
   const MAX_UNDO = 100;
+
+  const LINE_WRAP_THRESHOLD = 100;
 
   // ---------------------------------------------------------------------
   // DOM references
@@ -339,9 +377,11 @@
   const fileInput = document.getElementById("fileInput");
   const zoomLabel = document.getElementById("zoomLabel");
   const shortcutsPanel = document.getElementById("shortcutsPanel");
+  const mapNameInput = document.getElementById("mapNameInput");
 
   const addChildBtn = document.getElementById("addChildBtn");
   const undoBtn = document.getElementById("undoBtn");
+  const linkBtn = document.getElementById("linkBtn");
 
   // ---------------------------------------------------------------------
   // Pan & zoom
@@ -425,7 +465,7 @@
     const branchColor = parent === root
       ? PALETTE[branchColorCounter++ % PALETTE.length]
       : parent.branchColor;
-    return { id: idCounter++, parent: parent, text: text, children: [], collapsed: false, status: null, side: side, branchColor: branchColor };
+    return { id: idCounter++, parent: parent, text: text, children: [], collapsed: false, status: null, side: side, branchColor: branchColor, link: null };
   }
 
   function decideSide() {
@@ -520,6 +560,7 @@
     pushUndo();
     node.status = status;
     updateNodeEl(id);
+    autosave();
   }
 
   function appendEmoji(emoji) {
@@ -528,6 +569,21 @@
     if (!node) return;
     pushUndo();
     node.text = node.text ? node.text + " " + emoji : emoji;
+    relayout();
+  }
+
+  function normalizeUrl(u) {
+    return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(u) ? u : "https://" + u;
+  }
+
+  function editLink(id) {
+    const node = nodeIndex.get(id);
+    if (!node) return;
+    const input = prompt("Link URL for this node (leave blank to remove):", node.link || "");
+    if (input === null) return;
+    const trimmed = input.trim();
+    pushUndo();
+    node.link = trimmed ? normalizeUrl(trimmed) : null;
     relayout();
   }
 
@@ -605,12 +661,16 @@
     const div = document.createElement("div");
     div.className = "node";
     div.dataset.id = id;
-    div.innerHTML = '<span class="label"></span><span class="badge" hidden></span>';
+    div.innerHTML = '<span class="label"></span><span class="badge" hidden></span>' +
+      '<a class="link-icon" hidden target="_blank" rel="noopener noreferrer">🔗</a>';
     const label = div.querySelector(".label");
+    const linkIcon = div.querySelector(".link-icon");
 
     div.addEventListener("pointerdown", (e) => e.stopPropagation());
     div.addEventListener("click", (e) => { e.stopPropagation(); selectNode(id); });
     div.addEventListener("dblclick", (e) => { e.stopPropagation(); toggleCollapse(id); });
+    linkIcon.addEventListener("click", (e) => { e.stopPropagation(); selectNode(id); });
+    linkIcon.addEventListener("dblclick", (e) => e.stopPropagation());
 
     label.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); label.blur(); }
@@ -646,12 +706,25 @@
     label.contentEditable = isEditing ? "true" : "false";
     if (!isEditing) label.textContent = node.text;
 
+    const shouldWrap = node.text.length > LINE_WRAP_THRESHOLD;
+    label.style.whiteSpace = shouldWrap ? "normal" : "nowrap";
+    div.style.maxWidth = shouldWrap ? "420px" : "none";
+
     const badge = div.querySelector(".badge");
     if (node.collapsed && node.children.length > 0) {
       badge.hidden = false;
       badge.textContent = String(countDescendants(node));
     } else {
       badge.hidden = true;
+    }
+
+    const linkIcon = div.querySelector(".link-icon");
+    if (node.link) {
+      linkIcon.hidden = false;
+      linkIcon.href = node.link;
+    } else {
+      linkIcon.hidden = true;
+      linkIcon.removeAttribute("href");
     }
   }
 
@@ -736,6 +809,7 @@
 
     drawEdges(visibleIds, sizes);
     updateToolbarState();
+    autosave();
   }
 
   function drawEdges(visibleIds, sizes) {
@@ -787,6 +861,7 @@
   // ---------------------------------------------------------------------
   function updateToolbarState() {
     undoBtn.disabled = undoStack.length === 0;
+    linkBtn.disabled = selectedId == null;
     document.querySelectorAll(".emoji-btn").forEach((btn) => { btn.disabled = selectedId == null; });
   }
 
@@ -799,9 +874,19 @@
   });
   undoBtn.addEventListener("click", undo);
   document.getElementById("resetBtn").addEventListener("click", resetMap);
+  linkBtn.addEventListener("click", () => { if (selectedId != null) editLink(selectedId); });
 
   document.querySelectorAll(".emoji-btn").forEach((btn) => {
     btn.addEventListener("click", () => appendEmoji(btn.dataset.emoji));
+  });
+
+  mapNameInput.addEventListener("change", () => {
+    mapName = mapNameInput.value.trim() || "Untitled Mind Map";
+    mapNameInput.value = mapName;
+    autosave();
+  });
+  mapNameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") mapNameInput.blur();
   });
 
   document.getElementById("helpBtn").addEventListener("click", () => {
@@ -825,30 +910,103 @@
   }
 
   function serializeNode(node) {
-    let xml = '<node text="' + esc(node.text) + '" side="' + node.side + '" status="' + (node.status || "") + '" collapsed="' + node.collapsed + '">';
+    let xml = '<node text="' + esc(node.text) + '" side="' + node.side + '" status="' + (node.status || "") +
+      '" collapsed="' + node.collapsed + '"' + (node.link ? ' link="' + esc(node.link) + '"' : "") + '>';
     node.children.forEach((c) => { xml += serializeNode(c); });
     xml += "</node>";
     return xml;
   }
 
   function serializeMap() {
-    return '<?xml version="1.0" encoding="UTF-8"?>\n<mindmap version="1">\n' + serializeNode(root) + "\n</mindmap>";
+    return '<?xml version="1.0" encoding="UTF-8"?>\n<mindmap version="1" name="' + esc(mapName) + '">\n' +
+      serializeNode(root) + "\n</mindmap>";
   }
 
-  document.getElementById("saveBtn").addEventListener("click", () => {
-    const xml = serializeMap();
+  function sanitizeFilename(name) {
+    const cleaned = (name || "").trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+    return (cleaned || "Untitled Mind Map") + ".xml";
+  }
+
+  // ---------------------------------------------------------------------
+  // Persistent "same file" saving (File System Access API, Chromium),
+  // with a plain-download fallback for browsers that lack it.
+  // ---------------------------------------------------------------------
+  let fileHandle = null;
+  const IDB_NAME = "mindmap-app";
+  const IDB_STORE = "handles";
+  const IDB_KEY = "saveFile";
+
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function idbGet(key) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const r = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+  }
+  async function idbSet(key, val) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(val, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function downloadClassic(xml, filename) {
     const blob = new Blob([xml], { type: "application/xml" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const date = new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = "mindmap-" + date + ".xml";
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-  });
+  }
 
+  async function saveMap() {
+    const xml = serializeMap();
+    const filename = sanitizeFilename(mapName);
+
+    if (window.showSaveFilePicker) {
+      try {
+        if (fileHandle) {
+          const perm = await fileHandle.queryPermission({ mode: "readwrite" });
+          if (perm !== "granted" && (await fileHandle.requestPermission({ mode: "readwrite" })) !== "granted") {
+            fileHandle = null;
+          }
+        }
+        if (!fileHandle) {
+          fileHandle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{ description: "Mind Map XML", accept: { "application/xml": [".xml"] } }],
+          });
+          idbSet(IDB_KEY, fileHandle).catch(() => {});
+        }
+        const writable = await fileHandle.createWritable();
+        await writable.write(xml);
+        await writable.close();
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        // fall through to classic download on any other failure
+      }
+    }
+    downloadClassic(xml, filename);
+  }
+
+  document.getElementById("saveBtn").addEventListener("click", saveMap);
   document.getElementById("importBtn").addEventListener("click", () => fileInput.click());
 
   function nodeFromXml(el, parent) {
@@ -857,6 +1015,7 @@
     const node = parent ? createNode(parent, text, side) : freshRoot(text);
     node.status = el.getAttribute("status") || null;
     node.collapsed = el.getAttribute("collapsed") === "true";
+    node.link = el.getAttribute("link") || null;
     if (parent) parent.children.push(node);
     Array.from(el.children).forEach((childEl) => {
       if (childEl.tagName === "node") nodeFromXml(childEl, node);
@@ -864,41 +1023,72 @@
     return node;
   }
 
-  function importXmlText(xmlText) {
+  function importXmlText(xmlText, opts) {
+    const silent = opts && opts.silent;
     let doc;
     try {
       doc = new DOMParser().parseFromString(xmlText, "application/xml");
     } catch (err) {
-      alert("Could not parse this file as XML.");
-      return;
+      if (!silent) alert("Could not parse this file as XML.");
+      return false;
     }
     if (doc.querySelector("parsererror")) {
-      alert("This file is not a valid mind map XML file.");
-      return;
+      if (!silent) alert("This file is not a valid mind map XML file.");
+      return false;
     }
+    const mapEl = doc.querySelector("mindmap");
     const rootEl = doc.querySelector("mindmap > node");
-    if (!rootEl) {
-      alert("This file does not contain a mind map root node.");
-      return;
+    if (!mapEl || !rootEl) {
+      if (!silent) alert("This file does not contain a mind map root node.");
+      return false;
     }
-    pushUndo();
+    if (!silent) pushUndo();
     branchColorCounter = 0;
     root = nodeFromXml(rootEl, null);
+    mapName = mapEl.getAttribute("name") || "Untitled Mind Map";
+    mapNameInput.value = mapName;
     selectedId = null;
     editingId = null;
     reindex();
     relayout();
-    centerView();
+    if (!silent) centerView();
+    return true;
   }
 
   fileInput.addEventListener("change", () => {
     const file = fileInput.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => importXmlText(String(reader.result));
+    reader.onload = () => {
+      fileHandle = null; // imported file becomes the new save target on next Save
+      importXmlText(String(reader.result));
+    };
     reader.readAsText(file);
     fileInput.value = "";
   });
+
+  // ---------------------------------------------------------------------
+  // Autosave to localStorage, so an accidental page refresh (e.g. F5)
+  // never loses work.
+  // ---------------------------------------------------------------------
+  const AUTOSAVE_KEY = "mindmap-autosave-v1";
+
+  function autosave() {
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, serializeMap());
+    } catch (err) { /* storage unavailable or full — ignore */ }
+  }
+
+  function loadAutosave() {
+    let xml;
+    try {
+      xml = localStorage.getItem(AUTOSAVE_KEY);
+    } catch (err) {
+      return false;
+    }
+    if (!xml) return false;
+    return importXmlText(xml, { silent: true });
+  }
 
   // ---------------------------------------------------------------------
   // Keyboard shortcuts
@@ -927,7 +1117,7 @@
       if (selectedId != null) setStatus(selectedId, "red");
     } else if (e.key === "F7") {
       e.preventDefault();
-      if (selectedId != null) setStatus(selectedId, "orange");
+      if (selectedId != null) setStatus(selectedId, "yellow");
     } else if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
       e.preventDefault();
       undo();
@@ -937,9 +1127,13 @@
   // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
+  loadAutosave();
+  mapNameInput.value = mapName;
   centerView();
   relayout();
   selectNode(root.id);
+
+  idbGet(IDB_KEY).then((handle) => { if (handle) fileHandle = handle; }).catch(() => {});
 })();
 </script>
 </body>
