@@ -464,7 +464,11 @@
   // Tree helpers
   // ---------------------------------------------------------------------
   function createNode(parent, text, side) {
-    const branchColor = parent === root
+    // Use "is parent itself a root" (no parent of its own) rather than
+    // comparing to the global `root` variable: during import, the new tree
+    // is built up detached and only assigned to `root` after nodeFromXml
+    // returns, so `parent === root` would never match its own new root.
+    const branchColor = parent.parent === null
       ? PALETTE[branchColorCounter++ % PALETTE.length]
       : parent.branchColor;
     return { id: idCounter++, parent: parent, text: text, children: [], collapsed: false, status: null, side: side, branchColor: branchColor, link: null };
