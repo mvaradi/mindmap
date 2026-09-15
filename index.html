@@ -117,6 +117,7 @@
     top: 52px;
     right: 14px;
     background: #ffffff;
+    color: #000000;
     border: 1px solid var(--node-border);
     border-radius: 10px;
     box-shadow: var(--shadow-lg);
@@ -273,7 +274,7 @@
 
     <input type="text" id="mapNameInput" title="Name of this mind map" placeholder="Mind map name" maxlength="120">
 
-    <button id="addChildBtn" class="primary" title="Add child node (Enter)">➕ Add Child</button>
+    <button id="addChildBtn" class="primary" title="Add child node (Insert)">➕ Add Child</button>
     <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
     <button id="resetBtn" title="Reset to a single root node">🔄 Reset</button>
 
@@ -309,7 +310,8 @@
       <h3>Keyboard shortcuts</h3>
       <table>
         <tr><td>Click</td><td>Select node</td></tr>
-        <tr><td>Enter</td><td>Add child to selected node (or root)</td></tr>
+        <tr><td>Insert</td><td>Add child to selected node (or root)</td></tr>
+        <tr><td>Enter</td><td>Add sibling to selected node (no-op on root)</td></tr>
         <tr><td>F2</td><td>Edit selected node's text</td></tr>
         <tr><td>Delete</td><td>Delete node + its branch</td></tr>
         <tr><td>Double-click</td><td>Collapse / expand branch</td></tr>
@@ -524,6 +526,11 @@
     selectedId = child.id;
     relayout();
     startEditing(child.id);
+  }
+
+  function addSiblingAndEdit(node) {
+    if (!node || node === root) return;
+    addChildAndEdit(node.parent);
   }
 
   function requestDelete(id) {
@@ -797,8 +804,10 @@
         cursor += h + SIBLING_GAP;
       });
     }
-    layoutGroup(root.children.filter((c) => c.side === "right"), 1);
-    layoutGroup(root.children.filter((c) => c.side === "left"), -1);
+    if (!root.collapsed) {
+      layoutGroup(root.children.filter((c) => c.side === "right"), 1);
+      layoutGroup(root.children.filter((c) => c.side === "left"), -1);
+    }
 
     visibleIds.forEach((id) => {
       const node = nodeIndex.get(id);
@@ -1098,10 +1107,13 @@
     const active = document.activeElement;
     if (active && (active.tagName === "BUTTON" || active.tagName === "INPUT")) return;
 
-    if (e.key === "Enter") {
+    if (e.key === "Insert") {
       e.preventDefault();
       const parent = selectedId != null ? nodeIndex.get(selectedId) : root;
       addChildAndEdit(parent || root);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selectedId != null) addSiblingAndEdit(nodeIndex.get(selectedId));
     } else if (e.key === "F2") {
       if (selectedId != null) { e.preventDefault(); startEditing(selectedId); }
     } else if (e.key === "Delete") {
