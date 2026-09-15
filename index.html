@@ -869,8 +869,12 @@
       const p2y = node._y - minY;
       const dx = (p2x - p1x) * 0.55;
       const strokeW = Math.max(1.8, 6 - node._depth * 0.9);
+      // Fall back to a default color rather than ever writing an invalid
+      // stroke (e.g. the literal string "null"), which browsers silently
+      // drop — that would make the edge exist in the DOM but never paint.
+      const stroke = node.branchColor || PALETTE[0];
       svg += '<path d="M ' + p1x + ' ' + p1y + ' C ' + (p1x + dx) + ' ' + p1y + ', ' + (p2x - dx) + ' ' + p2y + ', ' + p2x + ' ' + p2y +
-        '" fill="none" stroke="' + node.branchColor + '" stroke-width="' + strokeW + '" stroke-linecap="round"/>';
+        '" fill="none" stroke="' + stroke + '" stroke-width="' + strokeW + '" stroke-linecap="round"/>';
     });
     edgesLayer.innerHTML = svg;
   }
@@ -900,7 +904,9 @@
   });
 
   mapNameInput.addEventListener("change", () => {
-    mapName = mapNameInput.value.trim() || "Untitled Mind Map";
+    const newName = mapNameInput.value.trim() || "Untitled Mind Map";
+    if (newName !== mapName) fileHandle = null; // renamed map -> Save should target a new file
+    mapName = newName;
     mapNameInput.value = mapName;
     autosave();
   });
