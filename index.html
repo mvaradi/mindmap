@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mind Map</title>
+<style>
+  :root {
+    --bg: #eef1f8;
+    --dot: #d6dcea;
+    --toolbar-bg: #1f2430;
+    --toolbar-fg: #e8eaf0;
+    --toolbar-border: #2c3244;
+    --accent: #4c6ef5;
+    --node-bg: #ffffff;
+    --node-fg: #22262f;
+    --node-border: #d7dce6;
+    --shadow: 0 2px 6px rgba(20, 20, 40, 0.15);
+    --shadow-lg: 0 6px 18px rgba(20, 20, 40, 0.22);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--node-fg);
+  }
+
+  #app {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* ---------- Toolbar ---------- */
+  #toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    background: var(--toolbar-bg);
+    color: var(--toolbar-fg);
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--toolbar-border);
+    z-index: 20;
+    position: relative;
+  }
+
+  #toolbar .brand {
+    font-weight: 700;
+    font-size: 15px;
+    margin-right: 10px;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+
+  #toolbar .sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--toolbar-border);
+    margin: 0 4px;
+  }
+
+  #toolbar button {
+    background: #2b3244;
+    color: var(--toolbar-fg);
+    border: 1px solid #3a4256;
+    border-radius: 7px;
+    padding: 7px 11px;
+    font-size: 13px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.15s, transform 0.05s;
+    white-space: nowrap;
+  }
+
+  #toolbar button:hover:not(:disabled) { background: #3a4258; }
+  #toolbar button:active:not(:disabled) { transform: translateY(1px); }
+  #toolbar button:disabled { opacity: 0.35; cursor: default; }
+
+  #toolbar button.primary { background: var(--accent); border-color: var(--accent); }
+  #toolbar button.primary:hover:not(:disabled) { background: #3b5bdb; }
+
+  #toolbar .emoji-btn { font-size: 15px; padding: 6px 9px; }
+
+  #zoomLabel {
+    font-size: 12px;
+    color: #a7adbd;
+    min-width: 42px;
+    text-align: center;
+  }
+
+  #shortcutsPanel {
+    display: none;
+    position: absolute;
+    top: 52px;
+    right: 14px;
+    background: #ffffff;
+    border: 1px solid var(--node-border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 14px 18px;
+    width: 300px;
+    z-index: 30;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  #shortcutsPanel.open { display: block; }
+  #shortcutsPanel h3 { margin: 0 0 8px; font-size: 14px; }
+  #shortcutsPanel table { width: 100%; border-collapse: collapse; }
+  #shortcutsPanel td { padding: 2px 0; vertical-align: top; }
+  #shortcutsPanel td:first-child {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+    padding-right: 10px;
+  }
+
+  /* ---------- Canvas ---------- */
+  #viewport {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    cursor: grab;
+    background-color: var(--bg);
+    background-image: radial-gradient(circle, var(--dot) 1.4px, transparent 1.4px);
+  }
+  #viewport.panning { cursor: grabbing; }
+
+  #world {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    transform-origin: 0 0;
+  }
+
+  #edgesLayer {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  #nodesLayer {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .node {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    width: fit-content;
+    max-width: 260px;
+    min-width: 24px;
+    background: var(--node-bg);
+    color: var(--node-fg);
+    border: 2px solid var(--branch-color, var(--node-border));
+    border-radius: 10px;
+    padding: 9px 15px;
+    font-size: 13.5px;
+    line-height: 1.35;
+    box-shadow: var(--shadow);
+    cursor: pointer;
+    user-select: none;
+    transition: box-shadow 0.12s, border-color 0.12s, background 0.12s;
+  }
+
+  .node .label {
+    outline: none;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+
+  .node:hover { box-shadow: var(--shadow-lg); }
+
+  .node.selected {
+    box-shadow: 0 0 0 3px rgba(76, 110, 245, 0.35), var(--shadow-lg);
+    border-color: var(--accent);
+  }
+
+  .node.root {
+    background: linear-gradient(135deg, #2b3a67, #1f2430);
+    color: #f5f6fa;
+    border: none;
+    font-size: 15.5px;
+    font-weight: 700;
+    padding: 14px 24px;
+    border-radius: 14px;
+    max-width: 320px;
+  }
+  .node.root.selected { box-shadow: 0 0 0 3px rgba(76, 110, 245, 0.55), var(--shadow-lg); }
+
+  .node.status-green  { background: #2f9e44; border-color: #2f9e44; color: #fff; }
+  .node.status-red    { background: #e03131; border-color: #e03131; color: #fff; }
+  .node.status-orange { background: #e8590c; border-color: #e8590c; color: #fff; }
+
+  .node .badge {
+    position: absolute;
+    top: -9px;
+    right: -9px;
+    background: #495057;
+    color: #fff;
+    font-size: 10.5px;
+    font-weight: 600;
+    border-radius: 9px;
+    padding: 1px 6px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    pointer-events: none;
+  }
+
+  .node.shake { animation: shake 0.32s; }
+  @keyframes shake {
+    10%, 90% { transform: translate(-50%, -50%) translateX(-1px); }
+    20%, 80% { transform: translate(-50%, -50%) translateX(2px); }
+    30%, 50%, 70% { transform: translate(-50%, -50%) translateX(-4px); }
+    40%, 60% { transform: translate(-50%, -50%) translateX(4px); }
+  }
+
+  #fileInput { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="brand">🧠 Mind Map</span>
+
+    <button id="addChildBtn" class="primary" title="Add child node (Enter)">➕ Add Child</button>
+    <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
+    <button id="resetBtn" title="Reset to a single root node">🔄 Reset</button>
+
+    <span class="sep"></span>
+
+    <button id="saveBtn" title="Save mind map to an XML file">💾 Save</button>
+    <button id="importBtn" title="Import a mind map from an XML file">📂 Import</button>
+    <input type="file" id="fileInput" accept=".xml,text/xml,application/xml">
+
+    <span class="sep"></span>
+
+    <button class="emoji-btn" data-emoji="✅" title="Append tick">✅</button>
+    <button class="emoji-btn" data-emoji="🛑" title="Append stop">🛑</button>
+    <button class="emoji-btn" data-emoji="⚠️" title="Append warning">⚠️</button>
+    <button class="emoji-btn" data-emoji="⬅️" title="Append arrow left">⬅️</button>
+    <button class="emoji-btn" data-emoji="➡️" title="Append arrow right">➡️</button>
+
+    <span class="sep"></span>
+
+    <button id="zoomOutBtn" title="Zoom out">➖</button>
+    <span id="zoomLabel">100%</span>
+    <button id="zoomInBtn" title="Zoom in">➕</button>
+    <button id="centerBtn" title="Center view">🎯 Center</button>
+
+    <span class="sep"></span>
+    <button id="helpBtn" title="Show keyboard shortcuts">❓ Shortcuts</button>
+
+    <div id="shortcutsPanel">
+      <h3>Keyboard shortcuts</h3>
+      <table>
+        <tr><td>Click</td><td>Select node</td></tr>
+        <tr><td>Enter</td><td>Add child to selected node (or root)</td></tr>
+        <tr><td>F2</td><td>Edit selected node's text</td></tr>
+        <tr><td>Delete</td><td>Delete node + its branch</td></tr>
+        <tr><td>Double-click</td><td>Collapse / expand branch</td></tr>
+        <tr><td>F1</td><td>Reset node color</td></tr>
+        <tr><td>F3</td><td>Color node green</td></tr>
+        <tr><td>F4</td><td>Color node red</td></tr>
+        <tr><td>F7</td><td>Color node orange</td></tr>
+        <tr><td>Ctrl+Z</td><td>Undo</td></tr>
+        <tr><td>Drag canvas</td><td>Pan</td></tr>
+        <tr><td>Scroll</td><td>Zoom</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div id="viewport">
+    <div id="world">
+      <svg id="edgesLayer"></svg>
+      <div id="nodesLayer"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------------------------------------------------------------------
+  // Constants
+  // ---------------------------------------------------------------------
+  const LEVEL_DX = 210;
+  const SIBLING_GAP = 22;
+  const PALETTE = ["#4c6ef5", "#37b24d", "#f59f00", "#e64980", "#15aabf", "#7048e8", "#f76707", "#0ca678", "#1098ad", "#c2255c"];
+  const EMOJI_KEYS = { "✅": "tick", "🛑": "stop", "⚠️": "warning", "⬅️": "left", "➡️": "right" };
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  let idCounter = 1;
+  let branchColorCounter = 0;
+
+  function freshRoot(text) {
+    idCounter = 1;
+    return { id: 0, parent: null, text: text, children: [], collapsed: false, status: null, side: "root", branchColor: null };
+  }
+
+  let root = freshRoot("Central Idea");
+  let selectedId = null;
+  let editingId = null;
+  const nodeIndex = new Map();   // id -> node
+  const nodeEls = new Map();     // id -> DOM element
+
+  const undoStack = [];
+  const MAX_UNDO = 100;
+
+  // ---------------------------------------------------------------------
+  // DOM references
+  // ---------------------------------------------------------------------
+  const viewportEl = document.getElementById("viewport");
+  const worldEl = document.getElementById("world");
+  const edgesLayer = document.getElementById("edgesLayer");
+  const nodesLayer = document.getElementById("nodesLayer");
+  const fileInput = document.getElementById("fileInput");
+  const zoomLabel = document.getElementById("zoomLabel");
+  const shortcutsPanel = document.getElementById("shortcutsPanel");
+
+  const addChildBtn = document.getElementById("addChildBtn");
+  const undoBtn = document.getElementById("undoBtn");
+
+  // ---------------------------------------------------------------------
+  // Pan & zoom
+  // ---------------------------------------------------------------------
+  let panX = 0, panY = 0, scale = 1;
+
+  function applyTransform() {
+    worldEl.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + scale + ")";
+    viewportEl.style.backgroundPosition = panX + "px " + panY + "px";
+    viewportEl.style.backgroundSize = (26 * scale) + "px " + (26 * scale) + "px";
+    zoomLabel.textContent = Math.round(scale * 100) + "%";
+  }
+
+  function centerView() {
+    panX = viewportEl.clientWidth / 2;
+    panY = viewportEl.clientHeight / 2;
+    scale = 1;
+    applyTransform();
+  }
+
+  function zoomBy(factor, cx, cy) {
+    const newScale = Math.min(2.5, Math.max(0.25, scale * factor));
+    if (cx === undefined) { cx = viewportEl.clientWidth / 2; cy = viewportEl.clientHeight / 2; }
+    // keep the world point under (cx, cy) fixed while zooming
+    const wx = (cx - panX) / scale;
+    const wy = (cy - panY) / scale;
+    scale = newScale;
+    panX = cx - wx * scale;
+    panY = cy - wy * scale;
+    applyTransform();
+  }
+
+  let isPanning = false, panStartX = 0, panStartY = 0, panOrigX = 0, panOrigY = 0, movedDuringPan = false;
+
+  viewportEl.addEventListener("pointerdown", (e) => {
+    isPanning = true;
+    movedDuringPan = false;
+    panStartX = e.clientX; panStartY = e.clientY;
+    panOrigX = panX; panOrigY = panY;
+    viewportEl.setPointerCapture(e.pointerId);
+    viewportEl.classList.add("panning");
+  });
+
+  viewportEl.addEventListener("pointermove", (e) => {
+    if (!isPanning) return;
+    const dx = e.clientX - panStartX;
+    const dy = e.clientY - panStartY;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedDuringPan = true;
+    if (movedDuringPan) {
+      panX = panOrigX + dx;
+      panY = panOrigY + dy;
+      applyTransform();
+    }
+  });
+
+  viewportEl.addEventListener("pointerup", (e) => {
+    if (!isPanning) return;
+    isPanning = false;
+    viewportEl.classList.remove("panning");
+    if (!movedDuringPan) {
+      // plain click on empty canvas -> deselect
+      selectNode(null);
+    }
+  });
+
+  viewportEl.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = viewportEl.getBoundingClientRect();
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    zoomBy(factor, e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+
+  document.getElementById("zoomInBtn").addEventListener("click", () => zoomBy(1.2));
+  document.getElementById("zoomOutBtn").addEventListener("click", () => zoomBy(1 / 1.2));
+  document.getElementById("centerBtn").addEventListener("click", centerView);
+
+  // ---------------------------------------------------------------------
+  // Tree helpers
+  // ---------------------------------------------------------------------
+  function createNode(parent, text, side) {
+    const branchColor = parent === root
+      ? PALETTE[branchColorCounter++ % PALETTE.length]
+      : parent.branchColor;
+    return { id: idCounter++, parent: parent, text: text, children: [], collapsed: false, status: null, side: side, branchColor: branchColor };
+  }
+
+  function decideSide() {
+    let left = 0, right = 0;
+    root.children.forEach((c) => { if (c.side === "left") left++; else right++; });
+    return right <= left ? "right" : "left";
+  }
+
+  function addChild(parentNode) {
+    const side = parentNode === root ? decideSide() : parentNode.side;
+    const child = createNode(parentNode, "New Idea", side);
+    parentNode.children.push(child);
+    if (parentNode.collapsed) parentNode.collapsed = false;
+    reindex();
+    return child;
+  }
+
+  function reindex() {
+    nodeIndex.clear();
+    (function walk(n) { nodeIndex.set(n.id, n); n.children.forEach(walk); })(root);
+  }
+
+  function countDescendants(node) {
+    let n = 0;
+    node.children.forEach((c) => { n += 1 + countDescendants(c); });
+    return n;
+  }
+
+  reindex();
+
+  // ---------------------------------------------------------------------
+  // Undo
+  // ---------------------------------------------------------------------
+  function pushUndo() {
+    undoStack.push(structuredClone(root));
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    updateToolbarState();
+  }
+
+  function undo() {
+    if (undoStack.length === 0) return;
+    root = undoStack.pop();
+    editingId = null;
+    reindex();
+    if (selectedId !== null && !nodeIndex.has(selectedId)) selectedId = null;
+    relayout();
+    updateToolbarState();
+  }
+
+  // ---------------------------------------------------------------------
+  // Mutating actions
+  // ---------------------------------------------------------------------
+  function addChildAndEdit(parentNode) {
+    pushUndo();
+    const child = addChild(parentNode);
+    selectedId = child.id;
+    relayout();
+    startEditing(child.id);
+  }
+
+  function requestDelete(id) {
+    const node = nodeIndex.get(id);
+    if (!node) return;
+    if (node === root) {
+      const el = nodeEls.get(id);
+      if (el) {
+        el.classList.remove("shake");
+        void el.offsetWidth;
+        el.classList.add("shake");
+      }
+      return;
+    }
+    pushUndo();
+    node.parent.children = node.parent.children.filter((c) => c !== node);
+    reindex();
+    if (selectedId !== null && !nodeIndex.has(selectedId)) selectedId = null;
+    if (editingId !== null && !nodeIndex.has(editingId)) editingId = null;
+    relayout();
+  }
+
+  function toggleCollapse(id) {
+    const node = nodeIndex.get(id);
+    if (!node || node.children.length === 0) return;
+    pushUndo();
+    node.collapsed = !node.collapsed;
+    relayout();
+  }
+
+  function setStatus(id, status) {
+    const node = nodeIndex.get(id);
+    if (!node) return;
+    pushUndo();
+    node.status = status;
+    updateNodeEl(id);
+  }
+
+  function appendEmoji(emoji) {
+    if (selectedId == null) return;
+    const node = nodeIndex.get(selectedId);
+    if (!node) return;
+    pushUndo();
+    node.text = node.text ? node.text + " " + emoji : emoji;
+    relayout();
+  }
+
+  function resetMap() {
+    if (!confirm("Reset the mind map back to a single root node?\n(You can undo this afterwards.)")) return;
+    pushUndo();
+    branchColorCounter = 0;
+    root = freshRoot("Central Idea");
+    selectedId = null;
+    editingId = null;
+    reindex();
+    relayout();
+    centerView();
+  }
+
+  // ---------------------------------------------------------------------
+  // Editing
+  // ---------------------------------------------------------------------
+  function startEditing(id) {
+    const node = nodeIndex.get(id);
+    if (!node) return;
+    editingId = id;
+    relayout();
+    const div = nodeEls.get(id);
+    const label = div && div.querySelector(".label");
+    if (label) {
+      label.focus();
+      const range = document.createRange();
+      range.selectNodeContents(label);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+
+  function finishEditing(id, commit) {
+    if (editingId !== id) return;
+    const node = nodeIndex.get(id);
+    const div = nodeEls.get(id);
+    const label = div && div.querySelector(".label");
+    if (commit && node && label) {
+      let text = (label.innerText || "").trim();
+      if (!text) text = node.text;
+      if (text !== node.text) {
+        pushUndo();
+        node.text = text;
+      }
+    }
+    editingId = null;
+    relayout();
+  }
+
+  // ---------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------
+  function selectNode(id) {
+    if (selectedId === id) return;
+    const prev = selectedId;
+    selectedId = id;
+    if (prev !== null && nodeEls.has(prev)) updateNodeEl(prev);
+    if (id !== null && nodeEls.has(id)) updateNodeEl(id);
+    updateToolbarState();
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering / layout
+  // ---------------------------------------------------------------------
+  function getVisibleIds() {
+    const ids = new Set();
+    (function walk(n) { ids.add(n.id); if (!n.collapsed) n.children.forEach(walk); })(root);
+    return ids;
+  }
+
+  function createNodeEl(id) {
+    const div = document.createElement("div");
+    div.className = "node";
+    div.dataset.id = id;
+    div.innerHTML = '<span class="label"></span><span class="badge" hidden></span>';
+    const label = div.querySelector(".label");
+
+    div.addEventListener("pointerdown", (e) => e.stopPropagation());
+    div.addEventListener("click", (e) => { e.stopPropagation(); selectNode(id); });
+    div.addEventListener("dblclick", (e) => { e.stopPropagation(); toggleCollapse(id); });
+
+    label.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); label.blur(); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finishEditing(id, false); }
+      else {
+        e.stopPropagation();
+        if (e.key === "F1" || e.key === "F2" || e.key === "F3" || e.key === "F4" || e.key === "F7") e.preventDefault();
+      }
+    });
+    label.addEventListener("blur", () => finishEditing(id, true));
+
+    nodeEls.set(id, div);
+    nodesLayer.appendChild(div);
+    return div;
+  }
+
+  function updateNodeEl(id) {
+    const node = nodeIndex.get(id);
+    const div = nodeEls.get(id);
+    if (!node || !div) return;
+    const isRoot = node === root;
+    const isEditing = editingId === id;
+
+    let cls = "node";
+    if (isRoot) cls += " root";
+    if (selectedId === id) cls += " selected";
+    if (node.status) cls += " status-" + node.status;
+    div.className = cls;
+
+    if (!isRoot && node.branchColor) div.style.setProperty("--branch-color", node.branchColor);
+
+    const label = div.querySelector(".label");
+    label.contentEditable = isEditing ? "true" : "false";
+    if (!isEditing) label.textContent = node.text;
+
+    const badge = div.querySelector(".badge");
+    if (node.collapsed && node.children.length > 0) {
+      badge.hidden = false;
+      badge.textContent = String(countDescendants(node));
+    } else {
+      badge.hidden = true;
+    }
+  }
+
+  function syncDom(visibleIds) {
+    visibleIds.forEach((id) => {
+      if (!nodeEls.has(id)) createNodeEl(id);
+      updateNodeEl(id);
+    });
+    Array.from(nodeEls.keys()).forEach((id) => {
+      if (!visibleIds.has(id)) {
+        const el = nodeEls.get(id);
+        el.remove();
+        nodeEls.delete(id);
+        if (editingId === id) editingId = null;
+      }
+    });
+  }
+
+  function relayout() {
+    const visibleIds = getVisibleIds();
+    syncDom(visibleIds);
+
+    // measure
+    const sizes = new Map();
+    visibleIds.forEach((id) => {
+      const el = nodeEls.get(id);
+      sizes.set(id, { w: el.offsetWidth, h: el.offsetHeight });
+    });
+
+    const extentCache = new Map();
+    function extent(node) {
+      if (extentCache.has(node.id)) return extentCache.get(node.id);
+      let val;
+      if (node.collapsed || node.children.length === 0) {
+        val = sizes.get(node.id).h;
+      } else {
+        let total = 0;
+        node.children.forEach((c, i) => { total += extent(c); if (i > 0) total += SIBLING_GAP; });
+        val = Math.max(total, sizes.get(node.id).h);
+      }
+      extentCache.set(node.id, val);
+      return val;
+    }
+
+    function place(node, depth, dir, centerY) {
+      node._x = dir * depth * LEVEL_DX;
+      node._y = centerY;
+      node._depth = depth;
+      if (!node.collapsed && node.children.length > 0) {
+        const total = node.children.reduce((s, c, i) => s + extent(c) + (i > 0 ? SIBLING_GAP : 0), 0);
+        let cursor = centerY - total / 2;
+        node.children.forEach((c) => {
+          const h = extent(c);
+          const cy = cursor + h / 2;
+          place(c, depth + 1, dir, cy);
+          cursor += h + SIBLING_GAP;
+        });
+      }
+    }
+
+    root._x = 0; root._y = 0; root._depth = 0;
+    function layoutGroup(kids, dir) {
+      if (kids.length === 0) return;
+      const total = kids.reduce((s, c, i) => s + extent(c) + (i > 0 ? SIBLING_GAP : 0), 0);
+      let cursor = -total / 2;
+      kids.forEach((c) => {
+        const h = extent(c);
+        const cy = cursor + h / 2;
+        place(c, 1, dir, cy);
+        cursor += h + SIBLING_GAP;
+      });
+    }
+    layoutGroup(root.children.filter((c) => c.side === "right"), 1);
+    layoutGroup(root.children.filter((c) => c.side === "left"), -1);
+
+    visibleIds.forEach((id) => {
+      const node = nodeIndex.get(id);
+      const el = nodeEls.get(id);
+      el.style.left = node._x + "px";
+      el.style.top = node._y + "px";
+    });
+
+    drawEdges(visibleIds, sizes);
+    updateToolbarState();
+  }
+
+  function drawEdges(visibleIds, sizes) {
+    // Chromium does not paint content that falls outside a 0x0 SVG box even
+    // with overflow:visible, so size/position the SVG to the map's bbox.
+    const margin = 40;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    visibleIds.forEach((id) => {
+      const node = nodeIndex.get(id);
+      const size = sizes.get(id);
+      minX = Math.min(minX, node._x - size.w / 2);
+      maxX = Math.max(maxX, node._x + size.w / 2);
+      minY = Math.min(minY, node._y - size.h / 2);
+      maxY = Math.max(maxY, node._y + size.h / 2);
+    });
+    minX -= margin; minY -= margin; maxX += margin; maxY += margin;
+    const width = Math.max(1, maxX - minX);
+    const height = Math.max(1, maxY - minY);
+
+    edgesLayer.style.left = minX + "px";
+    edgesLayer.style.top = minY + "px";
+    edgesLayer.style.width = width + "px";
+    edgesLayer.style.height = height + "px";
+    edgesLayer.setAttribute("width", width);
+    edgesLayer.setAttribute("height", height);
+
+    let svg = "";
+    visibleIds.forEach((id) => {
+      const node = nodeIndex.get(id);
+      if (node === root || !node.parent) return;
+      const parent = node.parent;
+      const dir = node.side === "left" ? -1 : 1;
+      const pSize = sizes.get(parent.id);
+      const cSize = sizes.get(node.id);
+      const p1x = parent._x + dir * (pSize.w / 2) - minX;
+      const p1y = parent._y - minY;
+      const p2x = node._x - dir * (cSize.w / 2) - minX;
+      const p2y = node._y - minY;
+      const dx = (p2x - p1x) * 0.55;
+      const strokeW = Math.max(1.8, 6 - node._depth * 0.9);
+      svg += '<path d="M ' + p1x + ' ' + p1y + ' C ' + (p1x + dx) + ' ' + p1y + ', ' + (p2x - dx) + ' ' + p2y + ', ' + p2x + ' ' + p2y +
+        '" fill="none" stroke="' + node.branchColor + '" stroke-width="' + strokeW + '" stroke-linecap="round"/>';
+    });
+    edgesLayer.innerHTML = svg;
+  }
+
+  // ---------------------------------------------------------------------
+  // Toolbar state
+  // ---------------------------------------------------------------------
+  function updateToolbarState() {
+    undoBtn.disabled = undoStack.length === 0;
+    document.querySelectorAll(".emoji-btn").forEach((btn) => { btn.disabled = selectedId == null; });
+  }
+
+  // ---------------------------------------------------------------------
+  // Toolbar wiring
+  // ---------------------------------------------------------------------
+  addChildBtn.addEventListener("click", () => {
+    const parent = selectedId != null ? nodeIndex.get(selectedId) : root;
+    addChildAndEdit(parent || root);
+  });
+  undoBtn.addEventListener("click", undo);
+  document.getElementById("resetBtn").addEventListener("click", resetMap);
+
+  document.querySelectorAll(".emoji-btn").forEach((btn) => {
+    btn.addEventListener("click", () => appendEmoji(btn.dataset.emoji));
+  });
+
+  document.getElementById("helpBtn").addEventListener("click", () => {
+    shortcutsPanel.classList.toggle("open");
+  });
+  document.addEventListener("click", (e) => {
+    if (!shortcutsPanel.contains(e.target) && e.target.id !== "helpBtn") {
+      shortcutsPanel.classList.remove("open");
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Save / Import (XML)
+  // ---------------------------------------------------------------------
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function serializeNode(node) {
+    let xml = '<node text="' + esc(node.text) + '" side="' + node.side + '" status="' + (node.status || "") + '" collapsed="' + node.collapsed + '">';
+    node.children.forEach((c) => { xml += serializeNode(c); });
+    xml += "</node>";
+    return xml;
+  }
+
+  function serializeMap() {
+    return '<?xml version="1.0" encoding="UTF-8"?>\n<mindmap version="1">\n' + serializeNode(root) + "\n</mindmap>";
+  }
+
+  document.getElementById("saveBtn").addEventListener("click", () => {
+    const xml = serializeMap();
+    const blob = new Blob([xml], { type: "application/xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = "mindmap-" + date + ".xml";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById("importBtn").addEventListener("click", () => fileInput.click());
+
+  function nodeFromXml(el, parent) {
+    const text = el.getAttribute("text") || "";
+    const side = el.getAttribute("side") || "right";
+    const node = parent ? createNode(parent, text, side) : freshRoot(text);
+    node.status = el.getAttribute("status") || null;
+    node.collapsed = el.getAttribute("collapsed") === "true";
+    if (parent) parent.children.push(node);
+    Array.from(el.children).forEach((childEl) => {
+      if (childEl.tagName === "node") nodeFromXml(childEl, node);
+    });
+    return node;
+  }
+
+  function importXmlText(xmlText) {
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(xmlText, "application/xml");
+    } catch (err) {
+      alert("Could not parse this file as XML.");
+      return;
+    }
+    if (doc.querySelector("parsererror")) {
+      alert("This file is not a valid mind map XML file.");
+      return;
+    }
+    const rootEl = doc.querySelector("mindmap > node");
+    if (!rootEl) {
+      alert("This file does not contain a mind map root node.");
+      return;
+    }
+    pushUndo();
+    branchColorCounter = 0;
+    root = nodeFromXml(rootEl, null);
+    selectedId = null;
+    editingId = null;
+    reindex();
+    relayout();
+    centerView();
+  }
+
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => importXmlText(String(reader.result));
+    reader.readAsText(file);
+    fileInput.value = "";
+  });
+
+  // ---------------------------------------------------------------------
+  // Keyboard shortcuts
+  // ---------------------------------------------------------------------
+  document.addEventListener("keydown", (e) => {
+    if (editingId !== null) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === "BUTTON" || active.tagName === "INPUT")) return;
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const parent = selectedId != null ? nodeIndex.get(selectedId) : root;
+      addChildAndEdit(parent || root);
+    } else if (e.key === "F2") {
+      if (selectedId != null) { e.preventDefault(); startEditing(selectedId); }
+    } else if (e.key === "Delete") {
+      if (selectedId != null) { e.preventDefault(); requestDelete(selectedId); }
+    } else if (e.key === "F1") {
+      e.preventDefault();
+      if (selectedId != null) setStatus(selectedId, null);
+    } else if (e.key === "F3") {
+      e.preventDefault();
+      if (selectedId != null) setStatus(selectedId, "green");
+    } else if (e.key === "F4") {
+      e.preventDefault();
+      if (selectedId != null) setStatus(selectedId, "red");
+    } else if (e.key === "F7") {
+      e.preventDefault();
+      if (selectedId != null) setStatus(selectedId, "orange");
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+      e.preventDefault();
+      undo();
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Init
+  // ---------------------------------------------------------------------
+  centerView();
+  relayout();
+  selectNode(root.id);
+})();
+</script>
+</body>
+</html>
