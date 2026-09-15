@@ -341,7 +341,7 @@
   // ---------------------------------------------------------------------
   // Constants
   // ---------------------------------------------------------------------
-  const LEVEL_DX = 210;
+  const EDGE_GAP = 70;
   const SIBLING_GAP = 22;
   const PALETTE = ["#4c6ef5", "#37b24d", "#f59f00", "#e64980", "#15aabf", "#7048e8", "#f76707", "#0ca678", "#1098ad", "#c2255c"];
   const EMOJI_KEYS = { "✅": "tick", "🛑": "stop", "⚠️": "warning", "⬅️": "left", "➡️": "right" };
@@ -777,7 +777,13 @@
     }
 
     function place(node, depth, dir, centerY) {
-      node._x = dir * depth * LEVEL_DX;
+      // Anchor by the near (parent-facing) edge, not the center, so a node's
+      // box only ever grows *away* from its parent — a wide child can never
+      // creep back over a narrow parent, however long its text is. Root is
+      // placed first (_x = 0) so node.parent._x is always already known here.
+      const parentHalfW = sizes.get(node.parent.id).w / 2;
+      const ownHalfW = sizes.get(node.id).w / 2;
+      node._x = node.parent._x + dir * (parentHalfW + EDGE_GAP + ownHalfW);
       node._y = centerY;
       node._depth = depth;
       if (!node.collapsed && node.children.length > 0) {
