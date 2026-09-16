@@ -264,6 +264,32 @@
     40%, 60% { transform: translate(-50%, -50%) translateX(4px); }
   }
 
+  .node.dragging {
+    opacity: 0.6;
+    box-shadow: var(--shadow-lg);
+    cursor: grabbing;
+    z-index: 50;
+  }
+  .node.drop-target {
+    box-shadow: 0 0 0 3px rgba(47, 158, 68, 0.55), var(--shadow-lg);
+    border-color: #2f9e44;
+  }
+  .node.cut-pending {
+    opacity: 0.45;
+    border-style: dashed;
+  }
+
+  #dragPreview {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+    z-index: 40;
+  }
+
   #fileInput { display: none; }
 </style>
 </head>
@@ -315,6 +341,9 @@
         <tr><td>F2</td><td>Edit selected node's text</td></tr>
         <tr><td>Delete</td><td>Delete node + its branch</td></tr>
         <tr><td>Double-click</td><td>Collapse / expand branch</td></tr>
+        <tr><td>Drag node</td><td>Move it (+ its branch) to a new parent</td></tr>
+        <tr><td>Ctrl+X</td><td>Cut node (+ its branch)</td></tr>
+        <tr><td>Ctrl+V</td><td>Paste cut node under selected node (or root)</td></tr>
         <tr><td>F1</td><td>Reset node color</td></tr>
         <tr><td>F3</td><td>Color node green</td></tr>
         <tr><td>F4</td><td>Color node red</td></tr>
@@ -331,6 +360,7 @@
       <svg id="edgesLayer"></svg>
       <div id="nodesLayer"></div>
     </div>
+    <svg id="dragPreview"></svg>
   </div>
 </div>
 
@@ -361,6 +391,7 @@
   let mapName = "Untitled Mind Map";
   let selectedId = null;
   let editingId = null;
+  let cutId = null;
   const nodeIndex = new Map();   // id -> node
   const nodeEls = new Map();     // id -> DOM element
 
@@ -380,6 +411,7 @@
   const zoomLabel = document.getElementById("zoomLabel");
   const shortcutsPanel = document.getElementById("shortcutsPanel");
   const mapNameInput = document.getElementById("mapNameInput");
+  const dragPreview = document.getElementById("dragPreview");
 
   const addChildBtn = document.getElementById("addChildBtn");
   const undoBtn = document.getElementById("undoBtn");
@@ -489,6 +521,33 @@
     return child;
   }
 
+  // Is `target` the given subtree's own top node, or somewhere inside it?
+  // Used to block moving a node into its own descendant (would create a cycle).
+  function containsNode(subtreeRoot, target) {
+    if (subtreeRoot === target) return true;
+    return subtreeRoot.children.some((c) => containsNode(c, target));
+  }
+
+  // Detach `node` from its current parent and reattach it under `newParent`,
+  // on `newSide`. The whole moved subtree inherits newParent's branch color
+  // (a fresh palette color if newParent is itself a root) and newSide, so
+  // edge color/width follow the node to its new position automatically —
+  // width comes from _depth, which relayout() recomputes from scratch.
+  function reparentNode(node, newParent, newSide) {
+    node.parent.children = node.parent.children.filter((c) => c !== node);
+    node.parent = newParent;
+    newParent.children.push(node);
+    if (newParent.collapsed) newParent.collapsed = false;
+    const newColor = newParent.parent === null
+      ? PALETTE[branchColorCounter++ % PALETTE.length]
+      : newParent.branchColor;
+    (function recolor(n) {
+      n.side = newSide;
+      n.branchColor = newColor;
+      n.children.forEach(recolor);
+    })(node);
+  }
+
   function reindex() {
     nodeIndex.clear();
     (function walk(n) { nodeIndex.set(n.id, n); n.children.forEach(walk); })(root);
@@ -554,6 +613,7 @@
     reindex();
     if (selectedId !== null && !nodeIndex.has(selectedId)) selectedId = null;
     if (editingId !== null && !nodeIndex.has(editingId)) editingId = null;
+    if (cutId !== null && !nodeIndex.has(cutId)) cutId = null;
     relayout();
   }
 
@@ -677,9 +737,18 @@
     const label = div.querySelector(".label");
     const linkIcon = div.querySelector(".link-icon");
 
-    div.addEventListener("pointerdown", (e) => e.stopPropagation());
-    div.addEventListener("click", (e) => { e.stopPropagation(); selectNode(id); });
+    div.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (e.button === 0 && editingId === null && id !== root.id) {
+        dragCandidate = { id: id, startX: e.clientX, startY: e.clientY };
+      }
+    });
+    div.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectNode(id);
+    });
     div.addEventListener("dblclick", (e) => { e.stopPropagation(); toggleCollapse(id); });
+    linkIcon.addEventListener("pointerdown", (e) => e.stopPropagation());
     linkIcon.addEventListener("click", (e) => { e.stopPropagation(); selectNode(id); });
     linkIcon.addEventListener("dblclick", (e) => e.stopPropagation());
 
@@ -709,6 +778,7 @@
     if (isRoot) cls += " root";
     if (selectedId === id) cls += " selected";
     if (node.status) cls += " status-" + node.status;
+    if (cutId === id) cls += " cut-pending";
     div.className = cls;
 
     if (!isRoot && node.branchColor) div.style.setProperty("--branch-color", node.branchColor);
@@ -824,6 +894,11 @@
       const el = nodeEls.get(id);
       el.style.left = node._x + "px";
       el.style.top = node._y + "px";
+      // Clear any leftover drag-time overrides (see "Drag & drop" below) —
+      // relayout() is always the last step of a drag gesture, successful or not.
+      el.style.transform = "";
+      el.style.pointerEvents = "";
+      el.style.display = "";
     });
 
     drawEdges(visibleIds, sizes);
@@ -873,7 +948,7 @@
       // stroke (e.g. the literal string "null"), which browsers silently
       // drop — that would make the edge exist in the DOM but never paint.
       const stroke = node.branchColor || PALETTE[0];
-      svg += '<path d="M ' + p1x + ' ' + p1y + ' C ' + (p1x + dx) + ' ' + p1y + ', ' + (p2x - dx) + ' ' + p2y + ', ' + p2x + ' ' + p2y +
+      svg += '<path id="edge-' + node.id + '" d="M ' + p1x + ' ' + p1y + ' C ' + (p1x + dx) + ' ' + p1y + ', ' + (p2x - dx) + ' ' + p2y + ', ' + p2x + ' ' + p2y +
         '" fill="none" stroke="' + stroke + '" stroke-width="' + strokeW + '" stroke-linecap="round"/>';
     });
     edgesLayer.innerHTML = svg;
@@ -922,6 +997,174 @@
       shortcutsPanel.classList.remove("open");
     }
   });
+
+  // ---------------------------------------------------------------------
+  // Drag & drop (move a node, with its whole branch, to a new parent)
+  // ---------------------------------------------------------------------
+  let dragCandidate = null; // { id, startX, startY } — pointer is down, not yet past the move threshold
+  let dragState = null;     // { id, subtreeIds, hoverId, startX, startY } — an actual drag in progress
+
+  function findDropTarget(clientX, clientY, excludeIds) {
+    const el = document.elementFromPoint(clientX, clientY);
+    const nodeEl = el && el.closest && el.closest(".node");
+    if (!nodeEl) return null;
+    const id = Number(nodeEl.dataset.id);
+    if (excludeIds.has(id)) return null; // can't drop a node on itself or its own descendants
+    return id;
+  }
+
+  function startDrag(id, startX, startY) {
+    const node = nodeIndex.get(id);
+    const subtreeIds = new Set();
+    (function walk(n) { subtreeIds.add(n.id); n.children.forEach(walk); })(node);
+    dragState = { id: id, subtreeIds: subtreeIds, hoverId: null, startX: startX, startY: startY };
+
+    // Hide the rest of the moving branch (everything below the dragged node)
+    // and every edge inside it — only the dragged node itself stays visible,
+    // following the cursor, for a simple and uncluttered drag visual. The
+    // whole branch reappears, correctly laid out, once relayout() runs again.
+    subtreeIds.forEach((sid) => {
+      if (sid === id) return;
+      const el = nodeEls.get(sid);
+      if (el) el.style.display = "none";
+      const path = document.getElementById("edge-" + sid);
+      if (path) path.style.display = "none";
+    });
+    const entryPath = document.getElementById("edge-" + id);
+    if (entryPath) entryPath.style.display = "none";
+
+    const el = nodeEls.get(id);
+    el.classList.add("dragging");
+    el.style.pointerEvents = "none";
+  }
+
+  function updateDrag(clientX, clientY) {
+    const node = nodeIndex.get(dragState.id);
+    const dxWorld = (clientX - dragState.startX) / scale;
+    const dyWorld = (clientY - dragState.startY) / scale;
+    const el = nodeEls.get(dragState.id);
+    el.style.transform = "translate(-50%, -50%) translate(" + dxWorld + "px, " + dyWorld + "px)";
+
+    // Dashed preview line in plain viewport screen coordinates (independent
+    // of pan/zoom, so no local-SVG-space math is needed), from the node's
+    // current parent to the cursor.
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const parentEl = nodeEls.get(node.parent.id);
+    const parentRect = parentEl.getBoundingClientRect();
+    const px = parentRect.left + parentRect.width / 2 - viewportRect.left;
+    const py = parentRect.top + parentRect.height / 2 - viewportRect.top;
+    const cx = clientX - viewportRect.left;
+    const cy = clientY - viewportRect.top;
+    dragPreview.innerHTML = '<line x1="' + px + '" y1="' + py + '" x2="' + cx + '" y2="' + cy +
+      '" stroke="' + (node.branchColor || PALETTE[0]) + '" stroke-width="2.5" stroke-dasharray="7 6" stroke-linecap="round"/>';
+
+    const targetId = findDropTarget(clientX, clientY, dragState.subtreeIds);
+    if (targetId !== dragState.hoverId) {
+      if (dragState.hoverId !== null) {
+        const prevEl = nodeEls.get(dragState.hoverId);
+        if (prevEl) prevEl.classList.remove("drop-target");
+      }
+      if (targetId !== null) {
+        const nextEl = nodeEls.get(targetId);
+        if (nextEl) nextEl.classList.add("drop-target");
+      }
+      dragState.hoverId = targetId;
+    }
+  }
+
+  function decideSideForDrop(clientX) {
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const worldX = (clientX - viewportRect.left - panX) / scale;
+    return worldX < root._x ? "left" : "right";
+  }
+
+  function finishDrag(clientX, clientY) {
+    const node = nodeIndex.get(dragState.id);
+    const targetId = findDropTarget(clientX, clientY, dragState.subtreeIds);
+    if (dragState.hoverId !== null) {
+      const el = nodeEls.get(dragState.hoverId);
+      if (el) el.classList.remove("drop-target");
+    }
+    dragPreview.innerHTML = "";
+
+    if (targetId !== null) {
+      const target = nodeIndex.get(targetId);
+      const newSide = target === root ? decideSideForDrop(clientX) : target.side;
+      if (target !== node.parent || newSide !== node.side) {
+        pushUndo();
+        reparentNode(node, target, newSide);
+        reindex();
+        selectedId = node.id;
+      }
+    }
+    // Un-hide the branch *before* relayout(), not after: relayout() measures
+    // each node's real size before it gets to its own cleanup loop, and a
+    // display:none element always measures as 0×0 — leaving these hidden
+    // into relayout() would make every hidden sibling collapse to zero
+    // height and get packed together instead of properly spaced.
+    dragState.subtreeIds.forEach((sid) => {
+      const el = nodeEls.get(sid);
+      if (el) el.style.display = "";
+    });
+    dragState = null;
+    relayout(); // also clears the transform/pointer-events overrides set above
+  }
+
+  document.addEventListener("pointermove", (e) => {
+    if (dragState) {
+      updateDrag(e.clientX, e.clientY);
+      return;
+    }
+    if (dragCandidate) {
+      const dx = e.clientX - dragCandidate.startX;
+      const dy = e.clientY - dragCandidate.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+        const c = dragCandidate;
+        dragCandidate = null;
+        startDrag(c.id, c.startX, c.startY);
+        updateDrag(e.clientX, e.clientY);
+      }
+    }
+  });
+
+  document.addEventListener("pointerup", (e) => {
+    dragCandidate = null;
+    if (dragState) finishDrag(e.clientX, e.clientY);
+  });
+
+  // ---------------------------------------------------------------------
+  // Cut / paste (an alternative, keyboard-only way to move a branch)
+  // ---------------------------------------------------------------------
+  function cutNode(id) {
+    if (id === root.id) return;
+    if (cutId !== null && nodeEls.has(cutId)) {
+      const prev = cutId;
+      cutId = null;
+      updateNodeEl(prev);
+    }
+    cutId = id;
+    updateNodeEl(id);
+  }
+
+  function pasteNode(targetId) {
+    if (cutId === null) return;
+    const cutNodeObj = nodeIndex.get(cutId);
+    const target = targetId != null ? nodeIndex.get(targetId) : root;
+    if (!cutNodeObj || !target) return;
+    if (containsNode(cutNodeObj, target)) return; // can't paste into its own branch
+    const newSide = target === root ? decideSide() : target.side;
+    if (target === cutNodeObj.parent && newSide === cutNodeObj.side) {
+      cutId = null;
+      updateNodeEl(cutNodeObj.id);
+      return;
+    }
+    pushUndo();
+    reparentNode(cutNodeObj, target, newSide);
+    cutId = null;
+    reindex();
+    selectedId = cutNodeObj.id;
+    relayout();
+  }
 
   // ---------------------------------------------------------------------
   // Save / Import (XML)
@@ -1149,6 +1392,15 @@
     } else if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
       e.preventDefault();
       undo();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === "x" || e.key === "X")) {
+      if (selectedId != null) { e.preventDefault(); cutNode(selectedId); }
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
+      if (cutId != null) { e.preventDefault(); pasteNode(selectedId); }
+    } else if (e.key === "Escape" && cutId != null) {
+      e.preventDefault();
+      const prev = cutId;
+      cutId = null;
+      if (nodeEls.has(prev)) updateNodeEl(prev);
     }
   });
 
