@@ -104,6 +104,22 @@
   }
   #mapNameInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+  #saveTarget {
+    font-size: 12px;
+    color: #a7adbd;
+    white-space: nowrap;
+    margin-right: 4px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  #dirtyDot {
+    color: #f59f00;
+    font-size: 15px;
+    line-height: 1;
+  }
+  #dirtyDot[hidden] { display: none; }
+
   #zoomLabel {
     font-size: 12px;
     color: #a7adbd;
@@ -264,6 +280,12 @@
     40%, 60% { transform: translate(-50%, -50%) translateX(4px); }
   }
 
+  .node.copy-flash { animation: copyFlash 0.4s; }
+  @keyframes copyFlash {
+    0%, 100% { box-shadow: var(--shadow); }
+    40% { box-shadow: 0 0 0 4px rgba(76, 110, 245, 0.5), var(--shadow-lg); }
+  }
+
   .node.dragging {
     opacity: 0.6;
     box-shadow: var(--shadow-lg);
@@ -302,11 +324,15 @@
 
     <button id="addChildBtn" class="primary" title="Add child node (Insert)">➕ Add Child</button>
     <button id="undoBtn" title="Undo (Ctrl+Z)">↩️ Undo</button>
+    <button id="redoBtn" title="Redo (Ctrl+Y or Ctrl+Shift+Z)">↪️ Redo</button>
     <button id="resetBtn" title="Reset to a single root node">🔄 Reset</button>
 
     <span class="sep"></span>
 
     <button id="saveBtn" title="Save mind map to an XML file">💾 Save</button>
+    <span id="saveTarget" title="File this Save button writes to">
+      <span id="saveTargetName">📄 Untitled Mind Map.xml</span><span id="dirtyDot" hidden title="Unsaved changes">●</span>
+    </span>
     <button id="importBtn" title="Import a mind map from an XML file">📂 Import</button>
     <input type="file" id="fileInput" accept=".xml,text/xml,application/xml">
 
@@ -336,19 +362,23 @@
       <h3>Keyboard shortcuts</h3>
       <table>
         <tr><td>Click</td><td>Select node</td></tr>
+        <tr><td>Arrow keys</td><td>Navigate to parent / child / sibling</td></tr>
         <tr><td>Insert</td><td>Add child to selected node (or root)</td></tr>
         <tr><td>Enter</td><td>Add sibling to selected node (no-op on root)</td></tr>
         <tr><td>F2</td><td>Edit selected node's text</td></tr>
         <tr><td>Delete</td><td>Delete node + its branch</td></tr>
         <tr><td>Double-click</td><td>Collapse / expand branch</td></tr>
         <tr><td>Drag node</td><td>Move it (+ its branch) to a new parent</td></tr>
+        <tr><td>Ctrl+Up/Down</td><td>Reorder node among its siblings</td></tr>
         <tr><td>Ctrl+X</td><td>Cut node (+ its branch)</td></tr>
-        <tr><td>Ctrl+V</td><td>Paste cut node under selected node (or root)</td></tr>
+        <tr><td>Ctrl+C</td><td>Copy node (+ its branch)</td></tr>
+        <tr><td>Ctrl+V</td><td>Paste cut/copied node under selected node (or root)</td></tr>
         <tr><td>F1</td><td>Reset node color</td></tr>
         <tr><td>F3</td><td>Color node green</td></tr>
         <tr><td>F4</td><td>Color node red</td></tr>
         <tr><td>F7</td><td>Color node yellow</td></tr>
         <tr><td>Ctrl+Z</td><td>Undo</td></tr>
+        <tr><td>Ctrl+Y / Ctrl+Shift+Z</td><td>Redo</td></tr>
         <tr><td>Drag canvas</td><td>Pan</td></tr>
         <tr><td>Scroll</td><td>Zoom</td></tr>
       </table>
@@ -392,10 +422,13 @@
   let selectedId = null;
   let editingId = null;
   let cutId = null;
+  let clipboardCopy = null; // a detached cloned subtree, ready to be pasted (repeatably)
+  let dirty = false;        // true once the live state has diverged from the last explicit Save/Import
   const nodeIndex = new Map();   // id -> node
   const nodeEls = new Map();     // id -> DOM element
 
   const undoStack = [];
+  const redoStack = [];
   const MAX_UNDO = 100;
 
   const LINE_WRAP_THRESHOLD = 100;
@@ -415,7 +448,10 @@
 
   const addChildBtn = document.getElementById("addChildBtn");
   const undoBtn = document.getElementById("undoBtn");
+  const redoBtn = document.getElementById("redoBtn");
   const linkBtn = document.getElementById("linkBtn");
+  const saveTargetName = document.getElementById("saveTargetName");
+  const dirtyDot = document.getElementById("dirtyDot");
 
   // ---------------------------------------------------------------------
   // Pan & zoom
@@ -528,13 +564,12 @@
     return subtreeRoot.children.some((c) => containsNode(c, target));
   }
 
-  // Detach `node` from its current parent and reattach it under `newParent`,
-  // on `newSide`. The whole moved subtree inherits newParent's branch color
-  // (a fresh palette color if newParent is itself a root) and newSide, so
-  // edge color/width follow the node to its new position automatically —
-  // width comes from _depth, which relayout() recomputes from scratch.
-  function reparentNode(node, newParent, newSide) {
-    node.parent.children = node.parent.children.filter((c) => c !== node);
+  // Attach `node` (already detached, or brand new) under `newParent`, on
+  // `newSide`. The whole subtree inherits newParent's branch color (a fresh
+  // palette color if newParent is itself a root) and newSide, so edge
+  // color/width follow the node to its new position automatically — width
+  // comes from _depth, which relayout() recomputes from scratch.
+  function attachNode(node, newParent, newSide) {
     node.parent = newParent;
     newParent.children.push(node);
     if (newParent.collapsed) newParent.collapsed = false;
@@ -546,6 +581,25 @@
       n.branchColor = newColor;
       n.children.forEach(recolor);
     })(node);
+  }
+
+  // Detach `node` from its current parent and reattach it under `newParent`.
+  function reparentNode(node, newParent, newSide) {
+    node.parent.children = node.parent.children.filter((c) => c !== node);
+    attachNode(node, newParent, newSide);
+  }
+
+  // Deep-clone a subtree with fresh ids (sharing the live idCounter, so no
+  // collisions), for Ctrl+C/Ctrl+V. side/branchColor are placeholders here —
+  // attachNode() recomputes them to match wherever the copy actually lands.
+  function cloneSubtree(node, parent) {
+    const clone = {
+      id: idCounter++, parent: parent, text: node.text, children: [],
+      collapsed: node.collapsed, status: node.status, side: node.side,
+      branchColor: node.branchColor, link: node.link,
+    };
+    clone.children = node.children.map((c) => cloneSubtree(c, clone));
+    return clone;
   }
 
   function reindex() {
@@ -562,20 +616,56 @@
   reindex();
 
   // ---------------------------------------------------------------------
-  // Undo
+  // Unsaved-changes tracking
+  // ---------------------------------------------------------------------
+  function markDirty() {
+    if (dirty) return;
+    dirty = true;
+    updateToolbarState();
+  }
+  function markClean() {
+    if (!dirty) return;
+    dirty = false;
+    updateToolbarState();
+  }
+
+  // ---------------------------------------------------------------------
+  // Undo / redo
   // ---------------------------------------------------------------------
   function pushUndo() {
     undoStack.push(structuredClone(root));
     if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack.length = 0; // a new edit invalidates whatever was available to redo
+    markDirty();
     updateToolbarState();
   }
 
   function undo() {
     if (undoStack.length === 0) return;
+    redoStack.push(structuredClone(root));
+    if (redoStack.length > MAX_UNDO) redoStack.shift();
     root = undoStack.pop();
     editingId = null;
+    cutId = null;
+    clipboardCopy = null;
     reindex();
     if (selectedId !== null && !nodeIndex.has(selectedId)) selectedId = null;
+    markDirty();
+    relayout();
+    updateToolbarState();
+  }
+
+  function redo() {
+    if (redoStack.length === 0) return;
+    undoStack.push(structuredClone(root));
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    root = redoStack.pop();
+    editingId = null;
+    cutId = null;
+    clipboardCopy = null;
+    reindex();
+    if (selectedId !== null && !nodeIndex.has(selectedId)) selectedId = null;
+    markDirty();
     relayout();
     updateToolbarState();
   }
@@ -665,9 +755,40 @@
     root = freshRoot("Central Idea");
     selectedId = null;
     editingId = null;
+    cutId = null;
+    clipboardCopy = null;
     reindex();
     relayout();
     centerView();
+  }
+
+  // Reorder `id` earlier/later (delta = -1/+1) among its same-side siblings
+  // (root's children are split into left/right groups for layout, so
+  // "siblings" for a depth-1 node means same-side root children only).
+  function moveSibling(id, delta) {
+    const node = nodeIndex.get(id);
+    if (!node || node === root) return;
+    const parent = node.parent;
+    if (parent === root) {
+      const sameSide = root.children.filter((c) => c.side === node.side);
+      const idx = sameSide.indexOf(node);
+      const newIdx = idx + delta;
+      if (newIdx < 0 || newIdx >= sameSide.length) return;
+      pushUndo();
+      sameSide.splice(idx, 1);
+      sameSide.splice(newIdx, 0, node);
+      const otherSide = root.children.filter((c) => c.side !== node.side);
+      root.children = node.side === "right" ? sameSide.concat(otherSide) : otherSide.concat(sameSide);
+    } else {
+      const siblings = parent.children;
+      const idx = siblings.indexOf(node);
+      const newIdx = idx + delta;
+      if (newIdx < 0 || newIdx >= siblings.length) return;
+      pushUndo();
+      siblings.splice(idx, 1);
+      siblings.splice(newIdx, 0, node);
+    }
+    relayout();
   }
 
   // ---------------------------------------------------------------------
@@ -717,6 +838,67 @@
     if (prev !== null && nodeEls.has(prev)) updateNodeEl(prev);
     if (id !== null && nodeEls.has(id)) updateNodeEl(id);
     updateToolbarState();
+  }
+
+  // Pan just enough to bring a node fully into view, with a small margin.
+  // Used only for keyboard navigation — clicks don't need this.
+  function ensureVisible(id) {
+    const el = nodeEls.get(id);
+    if (!el) return;
+    const nodeRect = el.getBoundingClientRect();
+    const viewportRect = viewportEl.getBoundingClientRect();
+    const margin = 60;
+    let dx = 0, dy = 0;
+    if (nodeRect.left < viewportRect.left + margin) dx = (viewportRect.left + margin) - nodeRect.left;
+    else if (nodeRect.right > viewportRect.right - margin) dx = (viewportRect.right - margin) - nodeRect.right;
+    if (nodeRect.top < viewportRect.top + margin) dy = (viewportRect.top + margin) - nodeRect.top;
+    else if (nodeRect.bottom > viewportRect.bottom - margin) dy = (viewportRect.bottom - margin) - nodeRect.bottom;
+    if (dx !== 0 || dy !== 0) {
+      panX += dx;
+      panY += dy;
+      applyTransform();
+    }
+  }
+
+  function selectAndReveal(id) {
+    selectNode(id);
+    ensureVisible(id);
+  }
+
+  // Same-side sibling group for Up/Down navigation — mirrors moveSibling().
+  function siblingGroup(node) {
+    if (node === root) return [root];
+    if (node.parent === root) return root.children.filter((c) => c.side === node.side);
+    return node.parent.children;
+  }
+
+  function navigateUpDown(delta) {
+    if (selectedId == null) { selectAndReveal(root.id); return; }
+    const node = nodeIndex.get(selectedId);
+    if (!node || node === root) return;
+    const group = siblingGroup(node);
+    const idx = group.indexOf(node);
+    const newIdx = idx + delta;
+    if (newIdx < 0 || newIdx >= group.length) return;
+    selectAndReveal(group[newIdx].id);
+  }
+
+  // Left/Right move toward the parent or into the children, depending on
+  // which side of root the selected node (and the arrow pressed) point to.
+  function navigateLeftRight(key) {
+    const node = selectedId != null ? nodeIndex.get(selectedId) : null;
+    if (!node) { selectAndReveal(root.id); return; }
+    const goingDeeper = node === root ? true : (key === "ArrowRight" ? node.side === "right" : node.side === "left");
+    if (goingDeeper) {
+      if (node.collapsed) return;
+      const kids = node === root
+        ? root.children.filter((c) => c.side === (key === "ArrowRight" ? "right" : "left"))
+        : node.children;
+      if (kids.length === 0) return;
+      selectAndReveal(kids[Math.floor((kids.length - 1) / 2)].id);
+    } else {
+      selectAndReveal(node.parent.id);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -959,8 +1141,11 @@
   // ---------------------------------------------------------------------
   function updateToolbarState() {
     undoBtn.disabled = undoStack.length === 0;
+    redoBtn.disabled = redoStack.length === 0;
     linkBtn.disabled = selectedId == null;
     document.querySelectorAll(".emoji-btn").forEach((btn) => { btn.disabled = selectedId == null; });
+    saveTargetName.textContent = "📄 " + sanitizeFilename(mapName);
+    dirtyDot.hidden = !dirty;
   }
 
   // ---------------------------------------------------------------------
@@ -971,6 +1156,7 @@
     addChildAndEdit(parent || root);
   });
   undoBtn.addEventListener("click", undo);
+  redoBtn.addEventListener("click", redo);
   document.getElementById("resetBtn").addEventListener("click", resetMap);
   linkBtn.addEventListener("click", () => { if (selectedId != null) editLink(selectedId); });
 
@@ -980,10 +1166,14 @@
 
   mapNameInput.addEventListener("change", () => {
     const newName = mapNameInput.value.trim() || "Untitled Mind Map";
-    if (newName !== mapName) fileHandle = null; // renamed map -> Save should target a new file
+    if (newName !== mapName) {
+      fileHandle = null; // renamed map -> Save should target a new file
+      markDirty();
+    }
     mapName = newName;
     mapNameInput.value = mapName;
     autosave();
+    updateToolbarState();
   });
   mapNameInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") mapNameInput.blur();
@@ -1133,10 +1323,11 @@
   });
 
   // ---------------------------------------------------------------------
-  // Cut / paste (an alternative, keyboard-only way to move a branch)
+  // Cut / copy / paste (a keyboard-only way to move or duplicate a branch)
   // ---------------------------------------------------------------------
   function cutNode(id) {
     if (id === root.id) return;
+    clipboardCopy = null; // cut and copy share one clipboard slot; last one wins
     if (cutId !== null && nodeEls.has(cutId)) {
       const prev = cutId;
       cutId = null;
@@ -1146,24 +1337,52 @@
     updateNodeEl(id);
   }
 
-  function pasteNode(targetId) {
-    if (cutId === null) return;
-    const cutNodeObj = nodeIndex.get(cutId);
-    const target = targetId != null ? nodeIndex.get(targetId) : root;
-    if (!cutNodeObj || !target) return;
-    if (containsNode(cutNodeObj, target)) return; // can't paste into its own branch
-    const newSide = target === root ? decideSide() : target.side;
-    if (target === cutNodeObj.parent && newSide === cutNodeObj.side) {
+  function copyNode(id) {
+    const node = nodeIndex.get(id);
+    if (!node) return;
+    if (cutId !== null) {
+      const prev = cutId;
       cutId = null;
-      updateNodeEl(cutNodeObj.id);
-      return;
+      if (nodeEls.has(prev)) updateNodeEl(prev);
     }
-    pushUndo();
-    reparentNode(cutNodeObj, target, newSide);
-    cutId = null;
-    reindex();
-    selectedId = cutNodeObj.id;
-    relayout();
+    clipboardCopy = cloneSubtree(node, null);
+    const el = nodeEls.get(id);
+    if (el) {
+      el.classList.remove("copy-flash");
+      void el.offsetWidth;
+      el.classList.add("copy-flash");
+    }
+  }
+
+  function pasteNode(targetId) {
+    const target = targetId != null ? nodeIndex.get(targetId) : root;
+    if (!target) return;
+
+    if (cutId !== null) {
+      const cutNodeObj = nodeIndex.get(cutId);
+      if (!cutNodeObj) { cutId = null; return; }
+      if (containsNode(cutNodeObj, target)) return; // can't paste into its own branch
+      const newSide = target === root ? decideSide() : target.side;
+      if (target === cutNodeObj.parent && newSide === cutNodeObj.side) {
+        cutId = null;
+        updateNodeEl(cutNodeObj.id);
+        return;
+      }
+      pushUndo();
+      reparentNode(cutNodeObj, target, newSide);
+      cutId = null;
+      reindex();
+      selectedId = cutNodeObj.id;
+      relayout();
+    } else if (clipboardCopy !== null) {
+      pushUndo();
+      const newSide = target === root ? decideSide() : target.side;
+      const copy = cloneSubtree(clipboardCopy, null);
+      attachNode(copy, target, newSide);
+      reindex();
+      selectedId = copy.id;
+      relayout();
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1265,6 +1484,7 @@
         const writable = await fileHandle.createWritable();
         await writable.write(xml);
         await writable.close();
+        markClean();
         return;
       } catch (err) {
         if (err && err.name === "AbortError") return;
@@ -1272,6 +1492,7 @@
       }
     }
     downloadClassic(xml, filename);
+    markClean();
   }
 
   document.getElementById("saveBtn").addEventListener("click", saveMap);
@@ -1317,9 +1538,11 @@
     mapNameInput.value = mapName;
     selectedId = null;
     editingId = null;
+    cutId = null;
+    clipboardCopy = null;
     reindex();
     relayout();
-    if (!silent) centerView();
+    if (!silent) { centerView(); markClean(); }
     return true;
   }
 
@@ -1365,6 +1588,7 @@
     if (editingId !== null) return;
     const active = document.activeElement;
     if (active && (active.tagName === "BUTTON" || active.tagName === "INPUT")) return;
+    const ctrl = e.ctrlKey || e.metaKey;
 
     if (e.key === "Insert") {
       e.preventDefault();
@@ -1389,13 +1613,34 @@
     } else if (e.key === "F7") {
       e.preventDefault();
       if (selectedId != null) setStatus(selectedId, "yellow");
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+    } else if (ctrl && e.shiftKey && (e.key === "z" || e.key === "Z")) {
+      e.preventDefault();
+      redo();
+    } else if (ctrl && (e.key === "y" || e.key === "Y")) {
+      e.preventDefault();
+      redo();
+    } else if (ctrl && (e.key === "z" || e.key === "Z")) {
       e.preventDefault();
       undo();
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === "x" || e.key === "X")) {
+    } else if (ctrl && (e.key === "x" || e.key === "X")) {
       if (selectedId != null) { e.preventDefault(); cutNode(selectedId); }
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
-      if (cutId != null) { e.preventDefault(); pasteNode(selectedId); }
+    } else if (ctrl && (e.key === "c" || e.key === "C")) {
+      if (selectedId != null) { e.preventDefault(); copyNode(selectedId); }
+    } else if (ctrl && (e.key === "v" || e.key === "V")) {
+      if (cutId != null || clipboardCopy != null) { e.preventDefault(); pasteNode(selectedId); }
+    } else if (ctrl && e.key === "ArrowUp") {
+      if (selectedId != null) { e.preventDefault(); moveSibling(selectedId, -1); }
+    } else if (ctrl && e.key === "ArrowDown") {
+      if (selectedId != null) { e.preventDefault(); moveSibling(selectedId, 1); }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      navigateUpDown(-1);
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      navigateUpDown(1);
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      navigateLeftRight(e.key);
     } else if (e.key === "Escape" && cutId != null) {
       e.preventDefault();
       const prev = cutId;
